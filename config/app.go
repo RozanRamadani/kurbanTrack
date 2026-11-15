@@ -11,6 +11,7 @@ import (
 
 func NewApp(
 	healthService *service.HealthService,
+	authService service.AuthService,
 	animalService service.AnimalService,
 	distributionService service.DistributionService,
 ) *fiber.App {
@@ -23,7 +24,7 @@ func NewApp(
 	app.Use(logger.New())
 
 	// Registrasi routes melalui dependency service
-	route.SetupRoutes(app, healthService, animalService, distributionService)
+	route.SetupRoutes(app, healthService, authService, animalService, distributionService)
 
 	return app
 }

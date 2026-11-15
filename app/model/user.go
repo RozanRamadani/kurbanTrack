@@ -48,3 +48,15 @@ type UserResponse struct {
 	RegionRT  *string   `json:"region_rt,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+// UserLoginRequest adalah DTO request untuk login pengguna.
+type UserLoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+// AuthResponse adalah DTO response setelah login berhasil.
+type AuthResponse struct {
+	Token string       `json:"token"`
+	User  UserResponse `json:"user"`
+}
