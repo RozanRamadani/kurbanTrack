@@ -11,4 +11,13 @@ var (
 
 	// ErrForeignKeyViolation dikembalikan ketika operasi melanggar constraint foreign key.
 	ErrForeignKeyViolation = errors.New("foreign key constraint violation")
+
+	// ErrConstraintViolation dikembalikan ketika operasi melanggar check constraint database.
+	ErrConstraintViolation = errors.New("database check constraint violation")
+
+	// ErrQuotaExceeded dikembalikan ketika kuota paket daging hewan sudah habis teralokasi.
+	ErrQuotaExceeded = errors.New("animal package quota exceeded")
+
+	// ErrInvalidStatusTransition dikembalikan ketika perubahan status kupon tidak valid.
+	ErrInvalidStatusTransition = errors.New("invalid distribution status transition")
 )
