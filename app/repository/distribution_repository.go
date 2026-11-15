@@ -273,3 +273,155 @@ func (r *distributionRepository) AllocateCouponTx(ctx context.Context, dist *mod
 
 	return tx.Commit(ctx)
 }
+
+func (r *distributionRepository) RedeemCouponTx(ctx context.Context, couponCode string, actorID int, note string) (*model.Distribution, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// 1. Kunci baris distribusi berdasarkan coupon_code
+	selectQuery := `
+		SELECT id, coupon_code, animal_id, coordinator_id, recipient_nik, recipient_name, recipient_rt, status, redeemed_at, created_at
+		FROM distributions
+		WHERE coupon_code = $1
+		FOR UPDATE
+	`
+	var dist model.Distribution
+	err = tx.QueryRow(ctx, selectQuery, couponCode).Scan(
+		&dist.ID,
+		&dist.CouponCode,
+		&dist.AnimalID,
+		&dist.CoordinatorID,
+		&dist.RecipientNIK,
+		&dist.RecipientName,
+		&dist.RecipientRT,
+		&dist.Status,
+		&dist.RedeemedAt,
+		&dist.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	// Kupon hanya boleh di-redeem jika status saat ini adalah 'allocated'
+	if dist.Status != model.DistributionStatusAllocated {
+		return nil, ErrInvalidStatusTransition
+	}
+
+	// 2. Perbarui status kupon menjadi 'redeemed' beserta timestamp penebusan
+	now := time.Now().UTC()
+	prevStatus := dist.Status
+	dist.Status = model.DistributionStatusRedeemed
+	dist.RedeemedAt = &now
+
+	updateQuery := `
+		UPDATE distributions
+		SET status = $1, redeemed_at = $2
+		WHERE id = $3
+	`
+	if _, err := tx.Exec(ctx, updateQuery, dist.Status, dist.RedeemedAt, dist.ID); err != nil {
+		return nil, mapPgError(err)
+	}
+
+	// 3. Catat audit trail perubahan status (allocated -> redeemed)
+	insertLogQuery := `
+		INSERT INTO distribution_logs (distribution_id, actor_id, from_status, to_status, note)
+		VALUES ($1, $2, $3, $4, $5)
+	`
+	if _, err := tx.Exec(ctx, insertLogQuery, dist.ID, actorID, prevStatus, dist.Status, note); err != nil {
+		return nil, mapPgError(err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return &dist, nil
+}
+
+func (r *distributionRepository) CancelCouponTx(ctx context.Context, couponCode string, actorID int, note string) (*model.Distribution, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// 1. Kunci baris distribusi berdasarkan coupon_code
+	selectQuery := `
+		SELECT id, coupon_code, animal_id, coordinator_id, recipient_nik, recipient_name, recipient_rt, status, redeemed_at, created_at
+		FROM distributions
+		WHERE coupon_code = $1
+		FOR UPDATE
+	`
+	var dist model.Distribution
+	err = tx.QueryRow(ctx, selectQuery, couponCode).Scan(
+		&dist.ID,
+		&dist.CouponCode,
+		&dist.AnimalID,
+		&dist.CoordinatorID,
+		&dist.RecipientNIK,
+		&dist.RecipientName,
+		&dist.RecipientRT,
+		&dist.Status,
+		&dist.RedeemedAt,
+		&dist.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	// Hanya kupon berstatus 'allocated' yang dapat dibatalkan
+	if dist.Status != model.DistributionStatusAllocated {
+		return nil, ErrInvalidStatusTransition
+	}
+
+	// 2. Ubah status kupon menjadi 'cancelled'
+	prevStatus := dist.Status
+	dist.Status = model.DistributionStatusCancelled
+
+	updateDistQuery := `
+		UPDATE distributions
+		SET status = $1
+		WHERE id = $2
+	`
+	if _, err := tx.Exec(ctx, updateDistQuery, dist.Status, dist.ID); err != nil {
+		return nil, mapPgError(err)
+	}
+
+	// 3. Kembalikan 1 kuota paket ke tabel animals
+	releaseQuotaQuery := `
+		UPDATE animals
+		SET allocated_packages = allocated_packages - 1
+		WHERE id = $1 AND allocated_packages > 0
+	`
+	cmdTag, err := tx.Exec(ctx, releaseQuotaQuery, dist.AnimalID)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return nil, ErrConstraintViolation
+	}
+
+	// 4. Catat audit trail pembatalan (allocated -> cancelled)
+	insertLogQuery := `
+		INSERT INTO distribution_logs (distribution_id, actor_id, from_status, to_status, note)
+		VALUES ($1, $2, $3, $4, $5)
+	`
+	if _, err := tx.Exec(ctx, insertLogQuery, dist.ID, actorID, prevStatus, dist.Status, note); err != nil {
+		return nil, mapPgError(err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return &dist, nil
+}
