@@ -39,16 +39,18 @@ func main() {
 	}
 
 	// 4. Inisialisasi repositories
+	userRepo := repository.NewUserRepository(dbPool)
 	animalRepo := repository.NewAnimalRepository(dbPool)
 	distributionRepo := repository.NewDistributionRepository(dbPool)
 
 	// 5. Inisialisasi services
 	healthService := service.NewHealthService(dbPool)
+	authService := service.NewAuthService(userRepo)
 	animalService := service.NewAnimalService(animalRepo)
 	distributionService := service.NewDistributionService(distributionRepo)
 
 	// 6. Inisialisasi aplikasi Fiber dengan dependency services
-	app := config.NewApp(healthService, animalService, distributionService)
+	app := config.NewApp(healthService, authService, animalService, distributionService)
 
 	// 7. Menangani graceful shutdown dengan batas waktu 5 detik
 	sigChan := make(chan os.Signal, 1)
