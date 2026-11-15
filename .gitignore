@@ -1,0 +1,27 @@
+# Environment files
+.env
+.env.local
+
+# Logs
+logs/*
+!logs/.gitkeep
+*.log
+
+# Binaries and executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+tmp/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
