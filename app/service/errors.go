@@ -14,6 +14,8 @@ var (
 
 	// ErrForeignKeyViolation dikembalikan saat penghapusan gagal karena pelanggaran integritas foreign key di database.
 	ErrForeignKeyViolation = errors.New("hewan tidak dapat dihapus karena masih memiliki data riwayat distribusi terkait")
+
+	ErrUnauthorized = errors.New("email atau password salah")
 )
 
 // ValidationError merepresentasikan kesalahan validasi aturan bisnis pada input pengguna.
