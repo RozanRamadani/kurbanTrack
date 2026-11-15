@@ -98,3 +98,32 @@ func TestModel_User_PasswordHash_ExcludedFromJSON(t *testing.T) {
 		t.Errorf("PasswordHash bocor ke dalam JSON: %s", jsonString)
 	}
 }
+
+func TestModel_IsValidRole(t *testing.T) {
+	validRoles := []string{
+		model.RoleAdmin,
+		model.RoleKoordinatorWilayah,
+		model.RolePanitiaDistribusi,
+	}
+
+	for _, r := range validRoles {
+		if !model.IsValidRole(r) {
+			t.Errorf("Role %q seharusnya valid", r)
+		}
+	}
+
+	invalidRoles := []string{
+		"",
+		"superadmin",
+		"guest",
+		"admin ",
+		"ADMIN",
+		"user",
+	}
+
+	for _, r := range invalidRoles {
+		if model.IsValidRole(r) {
+			t.Errorf("Role %q seharusnya tidak valid", r)
+		}
+	}
+}

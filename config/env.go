@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -16,6 +18,7 @@ type Config struct {
 	DBPassword string
 	DBName     string
 	DBSSLMode  string
+	JWTSecret  string
 }
 
 func LoadConfig() *Config {
@@ -32,7 +35,16 @@ func LoadConfig() *Config {
 		DBPassword: getEnv("DB_PASSWORD", "postgres"),
 		DBName:     getEnv("DB_NAME", "kurbantrack_db"),
 		DBSSLMode:  getEnv("DB_SSLMODE", "disable"),
+		JWTSecret:  os.Getenv("JWT_SECRET"),
 	}
+}
+
+// Validate memastikan parameter konfigurasi esensial terisi dan tidak kosong.
+func (c *Config) Validate() error {
+	if strings.TrimSpace(c.JWTSecret) == "" {
+		return errors.New("JWT_SECRET wajib dikonfigurasi dan tidak boleh kosong")
+	}
+	return nil
 }
 
 func (c *Config) GetDSN() string {
