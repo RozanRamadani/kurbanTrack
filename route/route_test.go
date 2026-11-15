@@ -163,6 +163,57 @@ func (m *mockDistributionRepoForHTTP) UpdateStatus(ctx context.Context, id int, 
 	return nil
 }
 
+func (m *mockDistributionRepoForHTTP) FindByRecipientNIK(ctx context.Context, nik string) (*model.Distribution, error) {
+	for _, d := range m.distributions {
+		if d.RecipientNIK == nik {
+			return d, nil
+		}
+	}
+	return nil, repository.ErrNotFound
+}
+
+func (m *mockDistributionRepoForHTTP) AllocateCouponTx(ctx context.Context, dist *model.Distribution, actorID int, note string) error {
+	dist.ID = m.nextID
+	m.nextID++
+	if dist.Status == "" {
+		dist.Status = model.DistributionStatusAllocated
+	}
+	dist.CreatedAt = time.Now()
+	m.distributions[dist.ID] = dist
+	return nil
+}
+
+func (m *mockDistributionRepoForHTTP) RedeemCouponTx(ctx context.Context, couponCode string, actorID int, note string) (*model.Distribution, error) {
+	for _, d := range m.distributions {
+		if d.CouponCode == couponCode {
+			if d.Status != model.DistributionStatusAllocated {
+				return nil, repository.ErrInvalidStatusTransition
+			}
+			now := time.Now().UTC()
+			d.Status = model.DistributionStatusRedeemed
+			d.RedeemedAt = &now
+			return d, nil
+		}
+	}
+	return nil, repository.ErrNotFound
+}
+
+func (m *mockDistributionRepoForHTTP) CancelCouponTx(ctx context.Context, couponCode string, actorID int, note string) (*model.Distribution, error) {
+	for _, d := range m.distributions {
+		if d.CouponCode == couponCode {
+			if d.Status != model.DistributionStatusAllocated {
+				return nil, repository.ErrInvalidStatusTransition
+			}
+			d.Status = model.DistributionStatusCancelled
+			return d, nil
+		}
+	}
+	return nil, repository.ErrNotFound
+}
+
+// Verifikasi kepatuhan interface saat compile-time
+var _ repository.DistributionRepository = (*mockDistributionRepoForHTTP)(nil)
+
 // ----------------------------------------------------------------------------
 // TEST CASES UNTUK ROUTE & HTTP INTEGRATION
 // ----------------------------------------------------------------------------
