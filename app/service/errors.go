@@ -15,7 +15,14 @@ var (
 	// ErrForeignKeyViolation dikembalikan saat penghapusan gagal karena pelanggaran integritas foreign key di database.
 	ErrForeignKeyViolation = errors.New("hewan tidak dapat dihapus karena masih memiliki data riwayat distribusi terkait")
 
+	// ErrUnauthorized dikembalikan saat kredensial email atau password tidak cocok.
 	ErrUnauthorized = errors.New("email atau password salah")
+
+	// ErrQuotaExceeded dikembalikan saat alokasi kupon melebihi kuota paket daging hewan yang tersedia.
+	ErrQuotaExceeded = errors.New("kuota paket daging untuk hewan ini sudah habis")
+
+	// ErrInvalidCouponStatus dikembalikan saat transisi status kupon (redeem/cancel) tidak memenuhi syarat status 'allocated'.
+	ErrInvalidCouponStatus = errors.New("status kupon tidak memenuhi syarat untuk operasi ini")
 )
 
 // ValidationError merepresentasikan kesalahan validasi aturan bisnis pada input pengguna.

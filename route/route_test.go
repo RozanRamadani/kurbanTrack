@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -221,11 +222,13 @@ func (m *mockDistributionRepoForHTTP) UpdateStatus(ctx context.Context, id int, 
 // ----------------------------------------------------------------------------
 
 func setupTestApp() (*fiber.App, *mockAnimalRepoForHTTP) {
+	_ = os.Setenv("JWT_SECRET", "test-secret-key-for-route-tests")
 	app, animalRepo, _ := setupTestAppWithDist()
 	return app, animalRepo
 }
 
 func setupTestAppWithDist() (*fiber.App, *mockAnimalRepoForHTTP, *mockDistributionRepoForHTTP) {
+	_ = os.Setenv("JWT_SECRET", "test-secret-key-for-route-tests")
 	userRepo := newMockUserRepoForHTTP()
 	repo := newMockAnimalRepoForHTTP()
 	distRepo := newMockDistributionRepoForHTTP()
@@ -241,6 +244,7 @@ func setupTestAppWithDist() (*fiber.App, *mockAnimalRepoForHTTP, *mockDistributi
 
 func generateTestToken(t *testing.T, role string) string {
 	t.Helper()
+	_ = os.Setenv("JWT_SECRET", "test-secret-key-for-route-tests")
 	token, err := helper.GenerateToken(1, "tester@kurbantrack.local", role, nil)
 	if err != nil {
 		t.Fatalf("Gagal generate test token untuk role %s: %v", role, err)
@@ -271,10 +275,9 @@ func TestHTTP_Auth_RegisterAndLogin_Success(t *testing.T) {
 
 	// 1. Register
 	regPayload := model.UserCreateRequest{
-		Name:     "Admin Masjid",
-		Email:    "admin@masjid.local",
+		Name:     "Panitia Masjid",
+		Email:    "panitia@masjid.local",
 		Password: "password123",
-		Role:     model.RoleAdmin,
 	}
 	regBody, _ := json.Marshal(regPayload)
 
@@ -289,9 +292,18 @@ func TestHTTP_Auth_RegisterAndLogin_Success(t *testing.T) {
 		t.Fatalf("Ekspektasi status 201 Created saat register, didapat %d", regResp.StatusCode)
 	}
 
+	var regResponse struct {
+		Success bool               `json:"success"`
+		Data    model.UserResponse `json:"data"`
+	}
+	_ = json.NewDecoder(regResp.Body).Decode(&regResponse)
+	if regResponse.Data.Role != model.RolePanitiaDistribusi {
+		t.Errorf("Ekspektasi role default panitia_distribusi, didapat: %s", regResponse.Data.Role)
+	}
+
 	// 2. Login
 	loginPayload := model.UserLoginRequest{
-		Email:    "admin@masjid.local",
+		Email:    "panitia@masjid.local",
 		Password: "password123",
 	}
 	loginBody, _ := json.Marshal(loginPayload)
@@ -305,6 +317,77 @@ func TestHTTP_Auth_RegisterAndLogin_Success(t *testing.T) {
 	}
 	if loginResp.StatusCode != http.StatusOK {
 		t.Errorf("Ekspektasi status 200 OK saat login, didapat %d", loginResp.StatusCode)
+	}
+}
+
+func TestHTTP_Auth_Register_PreventsPrivilegeEscalation(t *testing.T) {
+	app, _ := setupTestApp()
+
+	// Pengguna publik mencoba mendaftar sebagai Admin
+	regPayload := model.UserCreateRequest{
+		Name:     "Attacker",
+		Email:    "attacker@hacker.local",
+		Password: "password123",
+		Role:     model.RoleAdmin, // Usaha privilege escalation
+	}
+	regBody, _ := json.Marshal(regPayload)
+
+	regReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(regBody))
+	regReq.Header.Set("Content-Type", "application/json")
+
+	regResp, err := app.Test(regReq, -1)
+	if err != nil {
+		t.Fatalf("Gagal request register: %v", err)
+	}
+	if regResp.StatusCode != http.StatusCreated {
+		t.Fatalf("Ekspektasi status 201 Created, didapat %d", regResp.StatusCode)
+	}
+
+	var regResult struct {
+		Success bool               `json:"success"`
+		Data    model.UserResponse `json:"data"`
+	}
+	_ = json.NewDecoder(regResp.Body).Decode(&regResult)
+
+	// Pastikan role yang diberikan BUKAN Admin, melainkan default terendah (Panitia Distribusi)
+	if regResult.Data.Role == model.RoleAdmin {
+		t.Fatal("Privilege escalation bocor: Pengguna publik berhasil membuat akun Admin!")
+	}
+	if regResult.Data.Role != model.RolePanitiaDistribusi {
+		t.Errorf("Role harus panitia_distribusi, didapat: %s", regResult.Data.Role)
+	}
+
+	// Login dan buktikan token tidak bisa mengakses aksi Admin (POST /animals)
+	loginPayload := model.UserLoginRequest{
+		Email:    "attacker@hacker.local",
+		Password: "password123",
+	}
+	loginBody, _ := json.Marshal(loginPayload)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(loginBody))
+	loginReq.Header.Set("Content-Type", "application/json")
+
+	loginResp, _ := app.Test(loginReq, -1)
+	var authResult struct {
+		Data model.AuthResponse `json:"data"`
+	}
+	_ = json.NewDecoder(loginResp.Body).Decode(&authResult)
+
+	// Coba aksi mutasi hewan khusus Admin menggunakan token tersebut
+	animalPayload := model.AnimalCreateRequest{
+		Code:              "SP-HACK-01",
+		Species:           model.SpeciesSapi,
+		SohibulName:       "Hacker",
+		WeightKg:          300,
+		EstimatedPackages: 100,
+	}
+	animalBody, _ := json.Marshal(animalPayload)
+	animalReq := httptest.NewRequest(http.MethodPost, "/api/v1/animals", bytes.NewReader(animalBody))
+	animalReq.Header.Set("Content-Type", "application/json")
+	animalReq.Header.Set("Authorization", "Bearer "+authResult.Data.Token)
+
+	animalResp, _ := app.Test(animalReq, -1)
+	if animalResp.StatusCode != http.StatusForbidden {
+		t.Errorf("Ekspektasi 403 Forbidden saat token non-admin mengakses mutasi hewan, didapat %d", animalResp.StatusCode)
 	}
 }
 

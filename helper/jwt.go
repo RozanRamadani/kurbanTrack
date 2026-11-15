@@ -3,9 +3,19 @@ package helper
 import (
 	"errors"
 	"os"
+	"strings"
 	"time"
 
+	"kurbantrack-backend/app/model"
+
 	"github.com/golang-jwt/jwt/v5"
+)
+
+var (
+	ErrEmptyJWTSecret       = errors.New("JWT_SECRET wajib dikonfigurasi dan tidak boleh kosong")
+	ErrInvalidSigningMethod = errors.New("metode signing token tidak valid: wajib menggunakan HS256")
+	ErrInvalidToken         = errors.New("token tidak valid atau sudah kedaluwarsa")
+	ErrInvalidRole          = errors.New("role token tidak valid")
 )
 
 // JWTClaims menyimpan data identitas dan role pengguna di dalam payload token.
@@ -17,16 +27,25 @@ type JWTClaims struct {
 	jwt.RegisteredClaims
 }
 
-func getJWTSecret() []byte {
+func getJWTSecret() ([]byte, error) {
 	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		secret = "kurbantrack-default-secret-key-2026"
+	if strings.TrimSpace(secret) == "" {
+		return nil, ErrEmptyJWTSecret
 	}
-	return []byte(secret)
+	return []byte(secret), nil
 }
 
-// GenerateToken menghasilkan token JWT baru yang berlaku selama 24 jam.
+// GenerateToken menghasilkan token JWT baru yang berlaku selama 24 jam menggunakan algoritma HS256.
 func GenerateToken(userID int, email, role string, regionRT *string) (string, error) {
+	secret, err := getJWTSecret()
+	if err != nil {
+		return "", err
+	}
+
+	if !model.IsValidRole(role) {
+		return "", ErrInvalidRole
+	}
+
 	claims := JWTClaims{
 		UserID:   userID,
 		Email:    email,
@@ -39,24 +58,38 @@ func GenerateToken(userID int, email, role string, regionRT *string) (string, er
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(getJWTSecret())
+	return token.SignedString(secret)
 }
 
-// ParseToken memverifikasi tanda tangan token JWT dan mengembalikan claims-nya.
+// ParseToken memverifikasi tanda tangan token JWT menggunakan HS256 dan mengembalikan claims-nya.
 func ParseToken(tokenString string) (*JWTClaims, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, errors.New("metode signing token tidak valid")
-		}
-		return getJWTSecret(), nil
-	})
+	secret, err := getJWTSecret()
+	if err != nil {
+		return nil, err
+	}
+
+	token, err := jwt.ParseWithClaims(
+		tokenString,
+		&JWTClaims{},
+		func(token *jwt.Token) (interface{}, error) {
+			if token.Method == nil || token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
+				return nil, ErrInvalidSigningMethod
+			}
+			return secret, nil
+		},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}),
+	)
 	if err != nil {
 		return nil, err
 	}
 
 	claims, ok := token.Claims.(*JWTClaims)
 	if !ok || !token.Valid {
-		return nil, errors.New("token tidak valid atau sudah kedaluwarsa")
+		return nil, ErrInvalidToken
+	}
+
+	if !model.IsValidRole(claims.Role) {
+		return nil, ErrInvalidRole
 	}
 
 	return claims, nil

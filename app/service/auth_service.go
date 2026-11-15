@@ -35,6 +35,13 @@ func NewAuthService(userRepo repository.UserRepository) AuthService {
 // ----------------------------------------------------------------------------
 
 func (s *authService) RegisterUser(ctx context.Context, req *model.UserCreateRequest) (*model.UserResponse, error) {
+	if req == nil {
+		return nil, &ValidationError{
+			Field:   "request",
+			Message: "Data request registrasi tidak boleh kosong",
+		}
+	}
+
 	name := strings.TrimSpace(req.Name)
 	email := strings.TrimSpace(strings.ToLower(req.Email))
 
@@ -45,10 +52,15 @@ func (s *authService) RegisterUser(ctx context.Context, req *model.UserCreateReq
 		}
 	}
 
-	if req.Role != model.RoleAdmin && req.Role != model.RoleKoordinatorWilayah && req.Role != model.RolePanitiaDistribusi {
+	role := strings.TrimSpace(req.Role)
+	if role == "" {
+		role = model.RolePanitiaDistribusi
+	}
+
+	if !model.IsValidRole(role) {
 		return nil, &ValidationError{
 			Field:   "role",
-			Message: "Role harus admin, koordinator_wilayah, atau panitia_distribusi",
+			Message: "Role pengguna tidak valid",
 		}
 	}
 
@@ -61,7 +73,7 @@ func (s *authService) RegisterUser(ctx context.Context, req *model.UserCreateReq
 		Name:         name,
 		Email:        email,
 		PasswordHash: hashed,
-		Role:         req.Role,
+		Role:         role,
 		RegionRT:     req.RegionRT,
 	}
 
@@ -83,6 +95,13 @@ func (s *authService) RegisterUser(ctx context.Context, req *model.UserCreateReq
 }
 
 func (s *authService) LoginUser(ctx context.Context, req *model.UserLoginRequest) (*model.AuthResponse, error) {
+	if req == nil {
+		return nil, &ValidationError{
+			Field:   "request",
+			Message: "Data request login tidak boleh kosong",
+		}
+	}
+
 	email := strings.TrimSpace(strings.ToLower(req.Email))
 	if email == "" || req.Password == "" {
 		return nil, &ValidationError{
@@ -132,6 +151,9 @@ func (s *authService) Register(c *fiber.Ctx) error {
 			helper.ErrorResponse("Format request body tidak valid", err.Error()),
 		)
 	}
+
+	// Pencegahan Privilege Escalation: Registrasi publik mandiri selalu diberikan role default paling terbatas (Panitia Distribusi)
+	req.Role = model.RolePanitiaDistribusi
 
 	res, err := s.RegisterUser(c.Context(), &req)
 	if err != nil {

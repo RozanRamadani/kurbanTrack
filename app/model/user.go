@@ -9,6 +9,16 @@ const (
 	RolePanitiaDistribusi  = "panitia_distribusi"
 )
 
+// IsValidRole memeriksa apakah role termasuk dalam role yang valid di sistem KurbanTrack.
+func IsValidRole(role string) bool {
+	switch role {
+	case RoleAdmin, RoleKoordinatorWilayah, RolePanitiaDistribusi:
+		return true
+	default:
+		return false
+	}
+}
+
 // User merepresentasikan entitas pengguna dalam sistem KurbanTrack.
 type User struct {
 	ID           int       `json:"id"`

@@ -15,12 +15,15 @@ import (
 )
 
 func main() {
-	// 1. Memuat konfigurasi environment
-	cfg := config.LoadConfig()
-
-	// 2. Inisialisasi logger
+	// 1. Inisialisasi logger
 	appLogger := config.InitLogger()
 	appLogger.Info.Println("Inisialisasi KurbanTrack Backend...")
+
+	// 2. Memuat dan memvalidasi konfigurasi environment
+	cfg := config.LoadConfig()
+	if err := cfg.Validate(); err != nil {
+		appLogger.Error.Fatalf("Inisialisasi aplikasi gagal: %v", err)
+	}
 
 	// 3. Menghubungkan koneksi pool PostgreSQL
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
