@@ -45,7 +45,7 @@ func main() {
 	// 5. Inisialisasi services
 	healthService := service.NewHealthService(dbPool)
 	animalService := service.NewAnimalService(animalRepo)
-	distributionService := service.NewDistributionService(distributionRepo, animalRepo)
+	distributionService := service.NewDistributionService(distributionRepo)
 
 	// 6. Inisialisasi aplikasi Fiber dengan dependency services
 	app := config.NewApp(healthService, animalService, distributionService)

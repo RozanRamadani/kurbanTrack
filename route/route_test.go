@@ -111,20 +111,21 @@ func (m *mockAnimalRepoForHTTP) CountAllocationsByAnimalID(ctx context.Context, 
 
 type mockDistributionRepoForHTTP struct {
 	distributions map[int]*model.Distribution
-	animalRepo    *mockAnimalRepoForHTTP
 	nextID        int
 }
 
-func newMockDistributionRepoForHTTP(animalRepo *mockAnimalRepoForHTTP) *mockDistributionRepoForHTTP {
+func newMockDistributionRepoForHTTP() *mockDistributionRepoForHTTP {
 	return &mockDistributionRepoForHTTP{
 		distributions: make(map[int]*model.Distribution),
-		animalRepo:    animalRepo,
 		nextID:        1,
 	}
 }
 
 func (m *mockDistributionRepoForHTTP) Create(ctx context.Context, dist *model.Distribution) error {
-	return m.AllocateWithQuotaTx(ctx, dist)
+	dist.ID = m.nextID
+	m.nextID++
+	m.distributions[dist.ID] = dist
+	return nil
 }
 
 func (m *mockDistributionRepoForHTTP) FindByID(ctx context.Context, id int) (*model.Distribution, error) {
@@ -162,59 +163,6 @@ func (m *mockDistributionRepoForHTTP) UpdateStatus(ctx context.Context, id int, 
 	return nil
 }
 
-func (m *mockDistributionRepoForHTTP) AllocateWithQuotaTx(ctx context.Context, dist *model.Distribution) error {
-	for _, existing := range m.distributions {
-		if existing.CouponCode == dist.CouponCode || existing.RecipientNIK == dist.RecipientNIK {
-			return repository.ErrConflict
-		}
-	}
-	if m.animalRepo != nil {
-		animal, ok := m.animalRepo.animals[dist.AnimalID]
-		if !ok {
-			return repository.ErrNotFound
-		}
-		animal.AllocatedPackages++
-	}
-	dist.ID = m.nextID
-	m.nextID++
-	dist.CreatedAt = time.Now()
-	m.distributions[dist.ID] = dist
-	return nil
-}
-
-func (m *mockDistributionRepoForHTTP) RedeemCouponTx(ctx context.Context, couponCode string, redeemedAt time.Time, actorID int) (*model.Distribution, error) {
-	for _, d := range m.distributions {
-		if d.CouponCode == couponCode {
-			if d.Status != model.DistributionStatusAllocated {
-				return nil, repository.ErrConflict
-			}
-			d.Status = model.DistributionStatusRedeemed
-			d.RedeemedAt = &redeemedAt
-			return d, nil
-		}
-	}
-	return nil, repository.ErrNotFound
-}
-
-func (m *mockDistributionRepoForHTTP) CancelCouponTx(ctx context.Context, couponCode string, actorID int) (*model.Distribution, error) {
-	for _, d := range m.distributions {
-		if d.CouponCode == couponCode {
-			if d.Status != model.DistributionStatusAllocated {
-				return nil, repository.ErrConflict
-			}
-			d.Status = model.DistributionStatusCancelled
-			d.RedeemedAt = nil
-			if m.animalRepo != nil {
-				if animal, ok := m.animalRepo.animals[d.AnimalID]; ok && animal.AllocatedPackages > 0 {
-					animal.AllocatedPackages--
-				}
-			}
-			return d, nil
-		}
-	}
-	return nil, repository.ErrNotFound
-}
-
 // ----------------------------------------------------------------------------
 // TEST CASES UNTUK ROUTE & HTTP INTEGRATION
 // ----------------------------------------------------------------------------
@@ -226,9 +174,9 @@ func setupTestApp() (*fiber.App, *mockAnimalRepoForHTTP) {
 
 func setupTestAppWithDist() (*fiber.App, *mockAnimalRepoForHTTP, *mockDistributionRepoForHTTP) {
 	repo := newMockAnimalRepoForHTTP()
-	distRepo := newMockDistributionRepoForHTTP(repo)
+	distRepo := newMockDistributionRepoForHTTP()
 	animalService := service.NewAnimalService(repo)
-	distributionService := service.NewDistributionService(distRepo, repo)
+	distributionService := service.NewDistributionService(distRepo)
 	healthService := service.NewHealthService(nil)
 	app := config.NewApp(healthService, animalService, distributionService)
 	return app, repo, distRepo
@@ -572,8 +520,8 @@ func TestHTTP_Distribution_Create_Scaffold(t *testing.T) {
 		t.Fatalf("Gagal request: %v", err)
 	}
 
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("Ekspektasi status 401 Unauthorized saat user_id belum di-set di Locals, didapat %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("Ekspektasi status 501 Not Implemented untuk scaffold POST distributions, didapat %d", resp.StatusCode)
 	}
 }
 
@@ -587,7 +535,7 @@ func TestHTTP_Distribution_FindAll_Scaffold(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Ekspektasi status 200 OK untuk GET distributions, didapat %d", resp.StatusCode)
+		t.Errorf("Ekspektasi status 200 OK untuk scaffold GET distributions, didapat %d", resp.StatusCode)
 	}
 }
 
@@ -600,8 +548,8 @@ func TestHTTP_Distribution_Redeem_Scaffold(t *testing.T) {
 		t.Fatalf("Gagal request: %v", err)
 	}
 
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("Ekspektasi status 401 Unauthorized saat user_id belum di-set di Locals, didapat %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("Ekspektasi status 501 Not Implemented untuk scaffold PATCH redeem, didapat %d", resp.StatusCode)
 	}
 }
 
@@ -614,7 +562,7 @@ func TestHTTP_Distribution_Cancel_Scaffold(t *testing.T) {
 		t.Fatalf("Gagal request: %v", err)
 	}
 
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("Ekspektasi status 401 Unauthorized saat user_id belum di-set di Locals, didapat %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("Ekspektasi status 501 Not Implemented untuk scaffold PATCH cancel, didapat %d", resp.StatusCode)
 	}
 }
