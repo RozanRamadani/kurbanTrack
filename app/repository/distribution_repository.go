@@ -19,6 +19,11 @@ type DistributionRepository interface {
 	FindByCouponCode(ctx context.Context, couponCode string) (*model.Distribution, error)
 	FindAll(ctx context.Context) ([]model.Distribution, error)
 	UpdateStatus(ctx context.Context, id int, status string, redeemedAt *time.Time) error
+
+	// Atomic transactional operations
+	AllocateCouponTx(ctx context.Context, dist *model.Distribution, actorID int, note string) error
+	RedeemCouponTx(ctx context.Context, couponCode string, actorID int, note string) (*model.Distribution, error)
+	CancelCouponTx(ctx context.Context, couponCode string, actorID int, note string) (*model.Distribution, error)
 }
 
 type distributionRepository struct {
@@ -28,6 +33,21 @@ type distributionRepository struct {
 // NewDistributionRepository menginisialisasi repository Distribution dengan connection pool pgxpool.
 func NewDistributionRepository(db *pgxpool.Pool) DistributionRepository {
 	return &distributionRepository{db: db}
+}
+
+func mapPgError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23505": // unique_violation
+			return ErrConflict
+		case "23503": // foreign_key_violation
+			return ErrForeignKeyViolation
+		case "23514": // check_violation
+			return ErrConstraintViolation
+		}
+	}
+	return err
 }
 
 func (r *distributionRepository) Create(ctx context.Context, dist *model.Distribution) error {
@@ -181,4 +201,75 @@ func (r *distributionRepository) UpdateStatus(ctx context.Context, id int, statu
 	}
 
 	return nil
+}
+
+func (r *distributionRepository) AllocateCouponTx(ctx context.Context, dist *model.Distribution, actorID int, note string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// 1. Kunci baris hewan (row-level lock) dan validasi sisa kuota paket
+	var estimatedPackages, allocatedPackages int
+	lockAnimalQuery := `
+		SELECT estimated_packages, allocated_packages
+		FROM animals
+		WHERE id = $1
+		FOR UPDATE
+	`
+	if err := tx.QueryRow(ctx, lockAnimalQuery, dist.AnimalID).Scan(&estimatedPackages, &allocatedPackages); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	if allocatedPackages >= estimatedPackages {
+		return ErrQuotaExceeded
+	}
+
+	// 2. Tambah counter allocated_packages pada tabel animals
+	updateAnimalQuery := `
+		UPDATE animals
+		SET allocated_packages = allocated_packages + 1
+		WHERE id = $1
+	`
+	if _, err := tx.Exec(ctx, updateAnimalQuery, dist.AnimalID); err != nil {
+		return mapPgError(err)
+	}
+
+	// 3. Simpan kupon baru ke tabel distributions
+	if dist.Status == "" {
+		dist.Status = model.DistributionStatusAllocated
+	}
+
+	insertDistQuery := `
+		INSERT INTO distributions (coupon_code, animal_id, coordinator_id, recipient_nik, recipient_name, recipient_rt, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id, created_at
+	`
+	err = tx.QueryRow(ctx, insertDistQuery,
+		dist.CouponCode,
+		dist.AnimalID,
+		dist.CoordinatorID,
+		dist.RecipientNIK,
+		dist.RecipientName,
+		dist.RecipientRT,
+		dist.Status,
+	).Scan(&dist.ID, &dist.CreatedAt)
+	if err != nil {
+		return mapPgError(err)
+	}
+
+	// 4. Catat jejak audit awal ke distribution_logs (from_status = NULL -> allocated)
+	insertLogQuery := `
+		INSERT INTO distribution_logs (distribution_id, actor_id, from_status, to_status, note)
+		VALUES ($1, $2, NULL, $3, $4)
+	`
+	if _, err := tx.Exec(ctx, insertLogQuery, dist.ID, actorID, dist.Status, note); err != nil {
+		return mapPgError(err)
+	}
+
+	return tx.Commit(ctx)
 }
