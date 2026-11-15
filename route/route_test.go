@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -20,7 +21,60 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-// mockAnimalRepoForHTTP adalah mock repository untuk menguji HTTP handler tanpa PostgreSQL
+// ----------------------------------------------------------------------------
+// MOCK REPOSITORIES
+// ----------------------------------------------------------------------------
+
+type mockUserRepoForHTTP struct {
+	users  map[int]*model.User
+	nextID int
+}
+
+func newMockUserRepoForHTTP() *mockUserRepoForHTTP {
+	return &mockUserRepoForHTTP{
+		users:  make(map[int]*model.User),
+		nextID: 1,
+	}
+}
+
+func (m *mockUserRepoForHTTP) Create(ctx context.Context, user *model.User) error {
+	for _, u := range m.users {
+		if u.Email == user.Email {
+			return repository.ErrConflict
+		}
+	}
+	user.ID = m.nextID
+	m.nextID++
+	user.CreatedAt = time.Now()
+	m.users[user.ID] = user
+	return nil
+}
+
+func (m *mockUserRepoForHTTP) FindByID(ctx context.Context, id int) (*model.User, error) {
+	u, ok := m.users[id]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	return u, nil
+}
+
+func (m *mockUserRepoForHTTP) FindByEmail(ctx context.Context, email string) (*model.User, error) {
+	for _, u := range m.users {
+		if u.Email == email {
+			return u, nil
+		}
+	}
+	return nil, repository.ErrNotFound
+}
+
+func (m *mockUserRepoForHTTP) FindAll(ctx context.Context) ([]model.User, error) {
+	list := make([]model.User, 0, len(m.users))
+	for _, u := range m.users {
+		list = append(list, *u)
+	}
+	return list, nil
+}
+
 type mockAnimalRepoForHTTP struct {
 	animals           map[int]*model.Animal
 	activeAllocations map[int]int
@@ -164,23 +218,43 @@ func (m *mockDistributionRepoForHTTP) UpdateStatus(ctx context.Context, id int, 
 }
 
 // ----------------------------------------------------------------------------
-// TEST CASES UNTUK ROUTE & HTTP INTEGRATION
+// SETUP HELPER & TOKEN GENERATOR
 // ----------------------------------------------------------------------------
 
 func setupTestApp() (*fiber.App, *mockAnimalRepoForHTTP) {
+	_ = os.Setenv("JWT_SECRET", "test-secret-key-for-route-tests")
 	app, animalRepo, _ := setupTestAppWithDist()
 	return app, animalRepo
 }
 
 func setupTestAppWithDist() (*fiber.App, *mockAnimalRepoForHTTP, *mockDistributionRepoForHTTP) {
+	_ = os.Setenv("JWT_SECRET", "test-secret-key-for-route-tests")
+	userRepo := newMockUserRepoForHTTP()
 	repo := newMockAnimalRepoForHTTP()
 	distRepo := newMockDistributionRepoForHTTP()
+
+	authService := service.NewAuthService(userRepo)
 	animalService := service.NewAnimalService(repo)
 	distributionService := service.NewDistributionService(distRepo)
 	healthService := service.NewHealthService(nil)
-	app := config.NewApp(healthService, animalService, distributionService)
+
+	app := config.NewApp(healthService, authService, animalService, distributionService)
 	return app, repo, distRepo
 }
+
+func generateTestToken(t *testing.T, role string) string {
+	t.Helper()
+	_ = os.Setenv("JWT_SECRET", "test-secret-key-for-route-tests")
+	token, err := helper.GenerateToken(1, "tester@kurbantrack.local", role, nil)
+	if err != nil {
+		t.Fatalf("Gagal generate test token untuk role %s: %v", role, err)
+	}
+	return token
+}
+
+// ----------------------------------------------------------------------------
+// TEST CASES: HEALTH & AUTH ENDPOINTS
+// ----------------------------------------------------------------------------
 
 func TestHTTP_HealthEndpoint(t *testing.T) {
 	app, _ := setupTestApp()
@@ -196,8 +270,134 @@ func TestHTTP_HealthEndpoint(t *testing.T) {
 	}
 }
 
+func TestHTTP_Auth_RegisterAndLogin_Success(t *testing.T) {
+	app, _ := setupTestApp()
+
+	// 1. Register
+	regPayload := model.UserCreateRequest{
+		Name:     "Panitia Masjid",
+		Email:    "panitia@masjid.local",
+		Password: "password123",
+	}
+	regBody, _ := json.Marshal(regPayload)
+
+	regReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(regBody))
+	regReq.Header.Set("Content-Type", "application/json")
+
+	regResp, err := app.Test(regReq, -1)
+	if err != nil {
+		t.Fatalf("Gagal request register: %v", err)
+	}
+	if regResp.StatusCode != http.StatusCreated {
+		t.Fatalf("Ekspektasi status 201 Created saat register, didapat %d", regResp.StatusCode)
+	}
+
+	var regResponse struct {
+		Success bool               `json:"success"`
+		Data    model.UserResponse `json:"data"`
+	}
+	_ = json.NewDecoder(regResp.Body).Decode(&regResponse)
+	if regResponse.Data.Role != model.RolePanitiaDistribusi {
+		t.Errorf("Ekspektasi role default panitia_distribusi, didapat: %s", regResponse.Data.Role)
+	}
+
+	// 2. Login
+	loginPayload := model.UserLoginRequest{
+		Email:    "panitia@masjid.local",
+		Password: "password123",
+	}
+	loginBody, _ := json.Marshal(loginPayload)
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(loginBody))
+	loginReq.Header.Set("Content-Type", "application/json")
+
+	loginResp, err := app.Test(loginReq, -1)
+	if err != nil {
+		t.Fatalf("Gagal request login: %v", err)
+	}
+	if loginResp.StatusCode != http.StatusOK {
+		t.Errorf("Ekspektasi status 200 OK saat login, didapat %d", loginResp.StatusCode)
+	}
+}
+
+func TestHTTP_Auth_Register_PreventsPrivilegeEscalation(t *testing.T) {
+	app, _ := setupTestApp()
+
+	// Pengguna publik mencoba mendaftar sebagai Admin
+	regPayload := model.UserCreateRequest{
+		Name:     "Attacker",
+		Email:    "attacker@hacker.local",
+		Password: "password123",
+		Role:     model.RoleAdmin, // Usaha privilege escalation
+	}
+	regBody, _ := json.Marshal(regPayload)
+
+	regReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(regBody))
+	regReq.Header.Set("Content-Type", "application/json")
+
+	regResp, err := app.Test(regReq, -1)
+	if err != nil {
+		t.Fatalf("Gagal request register: %v", err)
+	}
+	if regResp.StatusCode != http.StatusCreated {
+		t.Fatalf("Ekspektasi status 201 Created, didapat %d", regResp.StatusCode)
+	}
+
+	var regResult struct {
+		Success bool               `json:"success"`
+		Data    model.UserResponse `json:"data"`
+	}
+	_ = json.NewDecoder(regResp.Body).Decode(&regResult)
+
+	// Pastikan role yang diberikan BUKAN Admin, melainkan default terendah (Panitia Distribusi)
+	if regResult.Data.Role == model.RoleAdmin {
+		t.Fatal("Privilege escalation bocor: Pengguna publik berhasil membuat akun Admin!")
+	}
+	if regResult.Data.Role != model.RolePanitiaDistribusi {
+		t.Errorf("Role harus panitia_distribusi, didapat: %s", regResult.Data.Role)
+	}
+
+	// Login dan buktikan token tidak bisa mengakses aksi Admin (POST /animals)
+	loginPayload := model.UserLoginRequest{
+		Email:    "attacker@hacker.local",
+		Password: "password123",
+	}
+	loginBody, _ := json.Marshal(loginPayload)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(loginBody))
+	loginReq.Header.Set("Content-Type", "application/json")
+
+	loginResp, _ := app.Test(loginReq, -1)
+	var authResult struct {
+		Data model.AuthResponse `json:"data"`
+	}
+	_ = json.NewDecoder(loginResp.Body).Decode(&authResult)
+
+	// Coba aksi mutasi hewan khusus Admin menggunakan token tersebut
+	animalPayload := model.AnimalCreateRequest{
+		Code:              "SP-HACK-01",
+		Species:           model.SpeciesSapi,
+		SohibulName:       "Hacker",
+		WeightKg:          300,
+		EstimatedPackages: 100,
+	}
+	animalBody, _ := json.Marshal(animalPayload)
+	animalReq := httptest.NewRequest(http.MethodPost, "/api/v1/animals", bytes.NewReader(animalBody))
+	animalReq.Header.Set("Content-Type", "application/json")
+	animalReq.Header.Set("Authorization", "Bearer "+authResult.Data.Token)
+
+	animalResp, _ := app.Test(animalReq, -1)
+	if animalResp.StatusCode != http.StatusForbidden {
+		t.Errorf("Ekspektasi 403 Forbidden saat token non-admin mengakses mutasi hewan, didapat %d", animalResp.StatusCode)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// TEST CASES: ANIMALS (DENGAN AUTH & RBAC)
+// ----------------------------------------------------------------------------
+
 func TestHTTP_CreateAnimal_Success(t *testing.T) {
 	app, _ := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 
 	payload := model.AnimalCreateRequest{
 		Code:              "SP-HTTP-01",
@@ -210,6 +410,7 @@ func TestHTTP_CreateAnimal_Success(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/animals", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := app.Test(req, -1)
 	if err != nil {
@@ -231,9 +432,11 @@ func TestHTTP_CreateAnimal_Success(t *testing.T) {
 
 func TestHTTP_CreateAnimal_InvalidJSON(t *testing.T) {
 	app, _ := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/animals", bytes.NewReader([]byte("{invalid-json")))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := app.Test(req, -1)
 	if err != nil {
@@ -247,9 +450,10 @@ func TestHTTP_CreateAnimal_InvalidJSON(t *testing.T) {
 
 func TestHTTP_CreateAnimal_ValidationError(t *testing.T) {
 	app, _ := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 
 	payload := model.AnimalCreateRequest{
-		Code:              "", // Kode kosong
+		Code:              "",
 		Species:           "kucing",
 		SohibulName:       "",
 		WeightKg:          -5,
@@ -259,6 +463,7 @@ func TestHTTP_CreateAnimal_ValidationError(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/animals", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := app.Test(req, -1)
 	if err != nil {
@@ -272,8 +477,8 @@ func TestHTTP_CreateAnimal_ValidationError(t *testing.T) {
 
 func TestHTTP_CreateAnimal_Conflict(t *testing.T) {
 	app, repo := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 
-	// Masukkan hewan awal
 	repo.animals[1] = &model.Animal{
 		ID:                1,
 		Code:              "SP-EXIST",
@@ -285,7 +490,6 @@ func TestHTTP_CreateAnimal_Conflict(t *testing.T) {
 	}
 	repo.nextID = 2
 
-	// Coba buat dengan kode yang sama
 	payload := model.AnimalCreateRequest{
 		Code:              "SP-EXIST",
 		Species:           model.SpeciesSapi,
@@ -297,6 +501,7 @@ func TestHTTP_CreateAnimal_Conflict(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/animals", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := app.Test(req, -1)
 	if err != nil {
@@ -310,6 +515,7 @@ func TestHTTP_CreateAnimal_Conflict(t *testing.T) {
 
 func TestHTTP_CreateAnimal_InternalError(t *testing.T) {
 	app, repo := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 	repo.createErr = errors.New("db disk failure")
 
 	payload := model.AnimalCreateRequest{
@@ -323,6 +529,7 @@ func TestHTTP_CreateAnimal_InternalError(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/animals", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, _ := app.Test(req, -1)
 	if resp.StatusCode != http.StatusInternalServerError {
@@ -332,11 +539,14 @@ func TestHTTP_CreateAnimal_InternalError(t *testing.T) {
 
 func TestHTTP_GetAllAnimals(t *testing.T) {
 	app, repo := setupTestApp()
+	token := generateTestToken(t, model.RolePanitiaDistribusi)
 
 	repo.animals[1] = &model.Animal{ID: 1, Code: "SP-01", Species: model.SpeciesSapi, SohibulName: "Ahmad", WeightKg: 300, EstimatedPackages: 80, Status: model.AnimalStatusRegistered}
 	repo.animals[2] = &model.Animal{ID: 2, Code: "KB-02", Species: model.SpeciesKambing, SohibulName: "Umar", WeightKg: 40, EstimatedPackages: 15, Status: model.AnimalStatusRegistered}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/animals", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
 	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("Gagal request: %v", err)
@@ -357,10 +567,13 @@ func TestHTTP_GetAllAnimals(t *testing.T) {
 
 func TestHTTP_GetAnimalByID_Success(t *testing.T) {
 	app, repo := setupTestApp()
+	token := generateTestToken(t, model.RoleKoordinatorWilayah)
 
 	repo.animals[1] = &model.Animal{ID: 1, Code: "SP-01", Species: model.SpeciesSapi, SohibulName: "Ahmad", WeightKg: 300, EstimatedPackages: 80, Status: model.AnimalStatusRegistered}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/animals/1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
 	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("Gagal request: %v", err)
@@ -373,8 +586,11 @@ func TestHTTP_GetAnimalByID_Success(t *testing.T) {
 
 func TestHTTP_GetAnimalByID_NotFound(t *testing.T) {
 	app, _ := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/animals/999", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
 	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("Gagal request: %v", err)
@@ -387,8 +603,11 @@ func TestHTTP_GetAnimalByID_NotFound(t *testing.T) {
 
 func TestHTTP_GetAnimalByID_InvalidID(t *testing.T) {
 	app, _ := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/animals/abc", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
 	resp, _ := app.Test(req, -1)
 
 	if resp.StatusCode != http.StatusBadRequest {
@@ -398,6 +617,7 @@ func TestHTTP_GetAnimalByID_InvalidID(t *testing.T) {
 
 func TestHTTP_UpdateAnimal_Success(t *testing.T) {
 	app, repo := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 
 	repo.animals[1] = &model.Animal{ID: 1, Code: "SP-01", Species: model.SpeciesSapi, SohibulName: "Ahmad", WeightKg: 300, EstimatedPackages: 80, Status: model.AnimalStatusRegistered}
 
@@ -413,6 +633,7 @@ func TestHTTP_UpdateAnimal_Success(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/animals/1", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := app.Test(req, -1)
 	if err != nil {
@@ -426,6 +647,7 @@ func TestHTTP_UpdateAnimal_Success(t *testing.T) {
 
 func TestHTTP_UpdateAnimal_NotFound(t *testing.T) {
 	app, _ := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 
 	payload := model.AnimalUpdateRequest{
 		Code:              "SP-01",
@@ -438,6 +660,7 @@ func TestHTTP_UpdateAnimal_NotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/animals/999", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, _ := app.Test(req, -1)
 	if resp.StatusCode != http.StatusNotFound {
@@ -447,10 +670,13 @@ func TestHTTP_UpdateAnimal_NotFound(t *testing.T) {
 
 func TestHTTP_DeleteAnimal_Success(t *testing.T) {
 	app, repo := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 
 	repo.animals[1] = &model.Animal{ID: 1, Code: "SP-01", Species: model.SpeciesSapi, SohibulName: "Ahmad", WeightKg: 300, EstimatedPackages: 80, Status: model.AnimalStatusRegistered}
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/animals/1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
 	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("Gagal request: %v", err)
@@ -463,11 +689,14 @@ func TestHTTP_DeleteAnimal_Success(t *testing.T) {
 
 func TestHTTP_DeleteAnimal_WithActiveAllocations(t *testing.T) {
 	app, repo := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 
 	repo.animals[1] = &model.Animal{ID: 1, Code: "SP-01", Species: model.SpeciesSapi, SohibulName: "Ahmad", WeightKg: 300, EstimatedPackages: 80, Status: model.AnimalStatusRegistered}
-	repo.activeAllocations[1] = 5 // Ada 5 alokasi aktif
+	repo.activeAllocations[1] = 5
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/animals/1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
 	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("Gagal request: %v", err)
@@ -480,11 +709,14 @@ func TestHTTP_DeleteAnimal_WithActiveAllocations(t *testing.T) {
 
 func TestHTTP_DeleteAnimal_ForeignKeyViolation(t *testing.T) {
 	app, repo := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 
 	repo.animals[1] = &model.Animal{ID: 1, Code: "SP-01", Species: model.SpeciesSapi, SohibulName: "Ahmad", WeightKg: 300, EstimatedPackages: 80, Status: model.AnimalStatusRegistered}
 	repo.deleteErr = repository.ErrForeignKeyViolation
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/animals/1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
 	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("Gagal request: %v", err)
@@ -497,8 +729,11 @@ func TestHTTP_DeleteAnimal_ForeignKeyViolation(t *testing.T) {
 
 func TestHTTP_DeleteAnimal_NotFound(t *testing.T) {
 	app, _ := setupTestApp()
+	token := generateTestToken(t, model.RoleAdmin)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/animals/999", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
 	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("Gagal request: %v", err)
@@ -509,11 +744,17 @@ func TestHTTP_DeleteAnimal_NotFound(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------------
+// TEST CASES: DISTRIBUTIONS (DENGAN AUTH & RBAC)
+// ----------------------------------------------------------------------------
+
 func TestHTTP_Distribution_Create_Scaffold(t *testing.T) {
 	app, _ := setupTestApp()
+	token := generateTestToken(t, model.RoleKoordinatorWilayah)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/distributions", bytes.NewReader([]byte("{}")))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := app.Test(req, -1)
 	if err != nil {
@@ -527,8 +768,11 @@ func TestHTTP_Distribution_Create_Scaffold(t *testing.T) {
 
 func TestHTTP_Distribution_FindAll_Scaffold(t *testing.T) {
 	app, _ := setupTestApp()
+	token := generateTestToken(t, model.RolePanitiaDistribusi)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/distributions", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
 	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("Gagal request: %v", err)
@@ -541,8 +785,11 @@ func TestHTTP_Distribution_FindAll_Scaffold(t *testing.T) {
 
 func TestHTTP_Distribution_Redeem_Scaffold(t *testing.T) {
 	app, _ := setupTestApp()
+	token := generateTestToken(t, model.RolePanitiaDistribusi)
 
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/distributions/CPN-123/redeem", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
 	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("Gagal request: %v", err)
@@ -555,8 +802,11 @@ func TestHTTP_Distribution_Redeem_Scaffold(t *testing.T) {
 
 func TestHTTP_Distribution_Cancel_Scaffold(t *testing.T) {
 	app, _ := setupTestApp()
+	token := generateTestToken(t, model.RoleKoordinatorWilayah)
 
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/distributions/CPN-123/cancel", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
 	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("Gagal request: %v", err)
